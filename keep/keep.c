@@ -1,292 +1,510 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <dirent.h>
+#include <sys/types.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
-#define MAX_COMMAND_LENGTH 100
-#define MAX_FILE_PATH_LENGTH 100
-#define MAX_NOTE_LENGTH 100
+#define MAX_FILE_PATH_LENGTH 256
 
 void keepInit();
-void keepTrack(char* target);
-void keepUntrack(char* target);
+void keepTrack(const char* path);
+void keepUntrack(const char* path);
 void keepVersions();
-void keepStore(char* note);
+void keepStore(const char* note);
 void keepRestore(int version);
 
-void init();
-void track(char input[]);
-void untrack(char input[]);
-void versions();
-void store(char input[]);
-void restore();
+int readLatestVersion();
+int checkModifiedFiles(int latestVersion);
+int copyTrackingFiles(const char* versionDir);
+int updateLatestVersion(int latestVersion);
+int storeNoteForVersion(const char* versionDir, const char* note);
+int copyFilesToTarget(const char* versionDir, const char* targetDir);
+int removeNonTrackingFiles();
+int copyFileToTarget(const char* source, const char* target);
 
-typedef struct {
-    char command[10];
-    char arg[MAX_COMMAND_LENGTH];
-} ParsedCommand;
-
-ParsedCommand parseCommand(char* input) {
-    ParsedCommand cmd;
-    char* token = strtok(input, " ");
-    strcpy(cmd.command, token);
-    token = strtok(NULL, "\n");
-    if (token != NULL) {
-        strcpy(cmd.arg, token);
-    } else {
-        strcpy(cmd.arg, "");
+int main(int argc, char* argv[]) {
+    if (argc < 3) {
+        printf("Error: No command specified.\n");
+        return 1;
     }
-    return cmd;
-}
-
-int main() {
-    char input[MAX_COMMAND_LENGTH];
-
-    while (1) {
-        printf("Enter a command: ");
-        fgets(input, sizeof(input), stdin);
-        input[strcspn(input, "\n")] = '\0'; // Remove the trailing newline character
-
-        ParsedCommand cmd = parseCommand(input);
-
-        if (strcmp(cmd.command, "keep") == 0) {
-            if (strcmp(cmd.arg, "init") == 0) {
-                keepInit();
-            } else if (strcmp(cmd.arg, "track") == 0) {
-                track(input);
-            } else if (strcmp(cmd.arg, "untrack") == 0) {
-                untrack(input);
-            } else if (strcmp(cmd.arg, "versions") == 0) {
-                keepVersions();
-            } else if (strcmp(cmd.arg, "store") == 0) {
-                store(input);
-            } else if (strcmp(cmd.arg, "restore") == 0) {
-                restore();
-            } else {
-                printf("Invalid command. Please try again.\n");
+    if (strcmp(argv[1], "keep") == 0) {
+        if (strcmp(argv[2], "init") == 0) {
+            keepInit();
+        } else if (strcmp(argv[2], "track") == 0) {
+            if (argc < 4) {
+                printf("Error: No file or directory specified.\n");
+                return 1;
             }
-        } else if (strcmp(cmd.command, "quit") == 0) {
-            printf("Exiting the program.\n");
-            break;
+            keepTrack(argv[3]);
+        } else if (strcmp(argv[2], "untrack") == 0) {
+            if (argc < 4) {
+                printf("Error: No file or directory specified.\n");
+                return 1;
+            }
+            keepUntrack(argv[3]);
+        } else if (strcmp(argv[2], "versions") == 0) {
+            keepVersions();
+        } else if (strcmp(argv[2], "store") == 0) {
+            if (argc < 4) {
+                printf("Error: No note specified.\n");
+                return 1;
+            }
+            keepStore(argv[3]);
+        } else if (strcmp(argv[2], "restore") == 0) {
+            if (argc < 4) {
+                printf("Error: No version specified.\n");
+                return 1;
+            }
+            int version = atoi(argv[3]);
+            keepRestore(version);
         } else {
-            printf("Invalid command. Please try again.\n");
+            printf("Error: Invalid command.\n");
+            return 1;
         }
+    } else {
+        printf("Error: Invalid command.\n");
+        return 1;
     }
 
     return 0;
 }
 
-void track(char input[]) {
-    // Get target from user
-    printf("Enter the target file or directory: ");
-    fgets(input, sizeof(input), stdin);
-    input[strcspn(input, "\n")] = '\0'; // Remove the trailing newline character
-    keepTrack(input);
-}
-
-void untrack(char input[]) {
-    // Get target from user
-    printf("Enter the target file or directory: ");
-    fgets(input, sizeof(input), stdin);
-    input[strcspn(input, "\n")] = '\0'; // Remove the trailing newline character
-    keepUntrack(input);
-}
-
-void store(char input[]) {
-    // Get note from user
-    printf("Enter the note: ");
-    fgets(input, sizeof(input), stdin);
-    input[strcspn(input, "\n")] = '\0'; // Remove the trailing newline character
-    keepStore(input);
-}
-
-void restore() {
-    // Get version from user
-    int version;
-    printf("Enter the version number: ");
-    scanf("%d", &version);
-    getchar(); // Remove the newline character from the input buffer
-    keepRestore(version);
-}
-
 void keepInit() {
-    // Implementation for 'keep init' command
-    struct stat st;
-    if (stat(".keep", &st) == 0) {
+    DIR* keepDir = opendir(".keep");
+    if (keepDir != NULL) {
         printf("Error: .keep directory already exists.\n");
-    } else {
-        int result = mkdir(".keep", 0700);
-        if (result == 0) {
-            FILE* trackingFiles = fopen(".keep/tracking-files", "w");
-            FILE* latestVersion = fopen(".keep/latest-version", "w");
-            if (trackingFiles != NULL && latestVersion != NULL) {
-                fclose(trackingFiles);
-                fclose(latestVersion);
-                printf("Successfully initialized the backup space.\n");
-            } else {
-                printf("Error: Failed to create tracking files or latest version file.\n");
-            }
-        } else {
-            printf("Error: Failed to create .keep directory.\n");
-        }
+        closedir(keepDir);
+        return;
     }
+
+    if (mkdir(".keep", 0700) != 0) {
+        printf("Error: Failed to create .keep directory.\n");
+        return;
+    }
+
+    FILE* trackingFiles = fopen(".keep/tracking-files", "w");
+    if (trackingFiles == NULL) {
+        printf("Error: Failed to create tracking-files file.\n");
+        return;
+    }
+    fclose(trackingFiles);
+
+    FILE* latestVersionFile = fopen(".keep/latest-version", "w");
+    if (latestVersionFile == NULL) {
+        printf("Error: Failed to create latest-version file.\n");
+        return;
+    }
+    fprintf(latestVersionFile, "0");
+    fclose(latestVersionFile);
+
+    printf("Initialized .keep directory.\n");
 }
 
-void keepTrack(char* target) {
-    // Implementation for 'keep track <file or directory>' command
+void keepTrack(const char* path) {
+    DIR* dir = opendir(path);
+    if (dir == NULL) {
+        printf("Error: Failed to open '%s' directory.\n", path);
+        return;
+    }
+
     FILE* trackingFiles = fopen(".keep/tracking-files", "a");
-    if (trackingFiles != NULL) {
-        fprintf(trackingFiles, "%s\n", target);
-        fclose(trackingFiles);
-        printf("Successfully added '%s' to tracking files.\n", target);
-    } else {
-        printf("Error: Failed to open tracking files.\n");
+    if (trackingFiles == NULL) {
+        printf("Error: Failed to open tracking-files file.\n");
+        closedir(dir);
+        return;
     }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char filePath[MAX_FILE_PATH_LENGTH];
+        snprintf(filePath, sizeof(filePath), "%s/%s", path, entry->d_name);
+
+        struct stat fileStat;
+        if (stat(filePath, &fileStat) == 0) {
+            fprintf(trackingFiles, "%s %ld\n", filePath, fileStat.st_mtime);
+        } else {
+            printf("Error: Failed to get information for file '%s'.\n", filePath);
+        }
+    }
+
+    fclose(trackingFiles);
+    closedir(dir);
+    printf("Tracking files in '%s'.\n", path);
 }
 
-void keepUntrack(char* target) {
-    // Implementation for 'keep untrack <file or directory>' command
+void keepUntrack(const char* path) {
     FILE* trackingFiles = fopen(".keep/tracking-files", "r");
-    if (trackingFiles != NULL) {
-        FILE* tempFile = fopen(".keep/temp", "w");
-        if (tempFile != NULL) {
-            char line[MAX_FILE_PATH_LENGTH];
-            int found = 0;
-            while (fgets(line, sizeof(line), trackingFiles) != NULL) {
-                line[strcspn(line, "\n")] = '\0'; // Remove the trailing newline character
-                if (strcmp(line, target) != 0) {
-                    fprintf(tempFile, "%s\n", line);
-                } else {
-                    found = 1;
-                }
-            }
-            fclose(trackingFiles);
-            fclose(tempFile);
+    if (trackingFiles == NULL) {
+        printf("Error: Failed to open tracking-files file.\n");
+        return;
+    }
 
-            if (found) {
-                remove(".keep/tracking-files");
-                rename(".keep/temp", ".keep/tracking-files");
-                printf("Successfully removed '%s' from tracking files.\n", target);
-            } else {
-                remove(".keep/temp");
-                printf("Error: '%s' is not found in tracking files.\n", target);
-            }
+    FILE* tempFile = fopen(".keep/tracking-files.temp", "w");
+    if (tempFile == NULL) {
+        printf("Error: Failed to create temporary file.\n");
+        fclose(trackingFiles);
+        return;
+    }
+
+    char filePath[MAX_FILE_PATH_LENGTH];
+    int found = 0;
+
+    while (fgets(filePath, sizeof(filePath), trackingFiles) != NULL) {
+        filePath[strcspn(filePath, "\n")] = '\0'; // Remove the trailing newline character
+
+        if (strcmp(filePath, path) == 0 || strncmp(filePath, path, strlen(path) + 1) == 0) {
+            found = 1;
         } else {
-            printf("Error: Failed to create temporary file.\n");
+            fprintf(tempFile, "%s\n", filePath);
         }
+    }
+
+    fclose(trackingFiles);
+    fclose(tempFile);
+
+    if (found) {
+        remove(".keep/tracking-files");
+        rename(".keep/tracking-files.temp", ".keep/tracking-files");
+        printf("Untracked '%s'.\n", path);
     } else {
-        printf("Error: Failed to open tracking files.\n");
+        remove(".keep/tracking-files.temp");
+        printf("Error: '%s' is not tracked.\n", path);
     }
 }
 
 void keepVersions() {
-    // Implementation for 'keep versions' command
-    FILE* latestVersion = fopen(".keep/latest-version", "r");
-    if (latestVersion != NULL) {
-        int latest;
-        fscanf(latestVersion, "%d", &latest);
-        fclose(latestVersion);
-
-        if (latest == 0) {
-            printf("No versions found.\n");
-        } else {
-            printf("Latest version: %d\n", latest);
-
-            char versionDir[MAX_FILE_PATH_LENGTH];
-            char note[MAX_NOTE_LENGTH];
-            for (int i = 1; i <= latest; i++) {
-                snprintf(versionDir, sizeof(versionDir), ".keep/%d", i);
-                snprintf(note, sizeof(note), "%s/%d/note", ".keep", i);
-
-                FILE* noteFile = fopen(note, "r");
-                if (noteFile != NULL) {
-                    char noteText[MAX_NOTE_LENGTH];
-                    fgets(noteText, sizeof(noteText), noteFile);
-                    fclose(noteFile);
-
-                    printf("Version %d - Note: %s\n", i, noteText);
-                } else {
-                    printf("Error: Failed to open note file for version %d.\n", i);
-                }
-            }
-        }
-    } else {
-        printf("Error: Failed to open latest version file.\n");
-    }
-}
-
-void keepStore(char* note) {
-    // Implementation for 'keep store "note"' command
-    int latestVersion = readLatestVersion();
-    if (latestVersion == -1) {
-        printf("Error: Failed to read the latest version number.\n");
+    FILE* latestVersionFile = fopen(".keep/latest-version", "r");
+    if (latestVersionFile == NULL) {
+        printf("Error: Failed to open latest-version file.\n");
         return;
     }
 
-    // Check if any tracking file has been modified
-    int modified = checkModifiedFiles(latestVersion);
-    if (!modified) {
+    int latestVersion;
+    fscanf(latestVersionFile, "%d", &latestVersion);
+    fclose(latestVersionFile);
+
+    printf("Latest Version: %d\n", latestVersion);
+
+    for (int version = 1; version <= latestVersion; version++) {
+        char versionDir[MAX_FILE_PATH_LENGTH];
+        snprintf(versionDir, sizeof(versionDir), ".keep/%d", version);
+
+        FILE* noteFile = fopen(".keep/note", "r");
+        if (noteFile == NULL) {
+            printf("Error: Failed to open note file for version %d.\n", version);
+            continue;
+        }
+
+        char note[256];
+        fgets(note, sizeof(note), noteFile);
+        fclose(noteFile);
+
+        printf("Version %d: %s", version, note);
+    }
+}
+
+void keepStore(const char* note) {
+    int latestVersion = readLatestVersion();
+    int modifiedFiles = checkModifiedFiles(latestVersion);
+
+    if (modifiedFiles == 0) {
         printf("Nothing to update.\n");
         return;
     }
 
-    // Create a new version directory
-    latestVersion++;
     char versionDir[MAX_FILE_PATH_LENGTH];
-    snprintf(versionDir, sizeof(versionDir), ".keep/%d", latestVersion);
+    snprintf(versionDir, sizeof(versionDir), ".keep/%d", latestVersion + 1);
 
     if (mkdir(versionDir, 0700) != 0) {
         printf("Error: Failed to create version directory.\n");
         return;
     }
 
-    // Copy tracking files to the target directory
-    if (!copyTrackingFiles(versionDir)) {
-        printf("Error: Failed to copy tracking files to the target directory.\n");
+    char targetDir[MAX_FILE_PATH_LENGTH];
+    snprintf(targetDir, sizeof(targetDir), "%s/target", versionDir);
+
+    if (mkdir(targetDir, 0700) != 0) {
+        printf("Error: Failed to create target directory.\n");
         return;
     }
 
-    // Update the latest version number
-    if (!updateLatestVersion(latestVersion)) {
-        printf("Error: Failed to update the latest version number.\n");
+    if (copyTrackingFiles(versionDir) != 0) {
+        printf("Error: Failed to copy tracking files.\n");
         return;
     }
 
-    // Store the note for the version
-    if (!storeNoteForVersion(versionDir, note)) {
-        printf("Error: Failed to store the note for the version.\n");
+    if (copyFilesToTarget(versionDir, targetDir) != 0) {
+        printf("Error: Failed to copy files to target directory.\n");
         return;
     }
 
-    printf("Successfully stored the current status as version %d.\n", latestVersion);
+    if (updateLatestVersion(latestVersion) != 0) {
+        printf("Error: Failed to update latest version.\n");
+        return;
+    }
+
+    if (storeNoteForVersion(versionDir, note) != 0) {
+        printf("Error: Failed to store note for the version.\n");
+        return;
+    }
+
+    printf("Stored version %d.\n", latestVersion + 1);
 }
 
 void keepRestore(int version) {
-    // Implementation for 'keep restore <version>' command
-    int modified = checkModifiedFiles(version);
-    if (modified) {
-        printf("Error: Some tracking files have been modified after the latest store or restore.\n");
+    int latestVersion = readLatestVersion();
+    int modifiedFiles = checkModifiedFiles(latestVersion);
+
+    if (modifiedFiles > 0) {
+        printf("Error: There are modified files. Please store the changes before restoring.\n");
         return;
     }
 
-    // Restore the specified version
+    if (version <= 0 || version > latestVersion) {
+        printf("Error: Invalid version number.\n");
+        return;
+    }
+
     char versionDir[MAX_FILE_PATH_LENGTH];
     snprintf(versionDir, sizeof(versionDir), ".keep/%d", version);
 
     char targetDir[MAX_FILE_PATH_LENGTH];
     snprintf(targetDir, sizeof(targetDir), "%s/target", versionDir);
 
-    // Copy files from the version directory to the target directory
-    if (!copyFilesToTarget(versionDir, targetDir)) {
-        printf("Error: Failed to copy files from the version directory to the target directory.\n");
+    DIR* dir = opendir(targetDir);
+    if (dir == NULL) {
+        printf("Error: Failed to open target directory for version %d.\n", version);
         return;
     }
 
-    // Remove non-tracking files
-    if (!removeNonTrackingFiles()) {
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char filePath[MAX_FILE_PATH_LENGTH];
+        snprintf(filePath, sizeof(filePath), "%s/%s", targetDir, entry->d_name);
+
+        if (remove(filePath) != 0) {
+            printf("Error: Failed to remove file '%s'.\n", filePath);
+        }
+    }
+
+    closedir(dir);
+
+    if (copyFilesToTarget(versionDir, targetDir) != 0) {
+        printf("Error: Failed to restore files to target directory.\n");
+        return;
+    }
+
+    if (removeNonTrackingFiles() != 0) {
         printf("Error: Failed to remove non-tracking files.\n");
         return;
     }
 
-    printf("Successfully restored version %d.\n", version);
+    printf("Restored version %d.\n", version);
+}
+
+int readLatestVersion() {
+    FILE* latestVersionFile = fopen(".keep/latest-version", "r");
+    if (latestVersionFile == NULL) {
+        printf("Error: Failed to open latest-version file.\n");
+        return -1;
+    }
+
+    int latestVersion;
+    fscanf(latestVersionFile, "%d", &latestVersion);
+    fclose(latestVersionFile);
+
+    return latestVersion;
+}
+
+int checkModifiedFiles(int latestVersion) {
+    FILE* trackingFiles = fopen(".keep/tracking-files", "r");
+    if (trackingFiles == NULL) {
+        printf("Error: Failed to open tracking-files file.\n");
+        return -1;
+    }
+
+    char filePath[MAX_FILE_PATH_LENGTH];
+    int modifiedFiles = 0;
+
+    while (fgets(filePath, sizeof(filePath), trackingFiles) != NULL) {
+        filePath[strcspn(filePath, "\n")] = '\0'; // Remove the trailing newline character
+
+        char* filePtr = strtok(filePath, " ");
+        char* timePtr = strtok(NULL, " ");
+
+        if (filePtr == NULL || timePtr == NULL) {
+            continue;
+        }
+
+        struct stat fileStat;
+        if (stat(filePtr, &fileStat) == 0) {
+            if (fileStat.st_mtime > atoi(timePtr)) {
+                modifiedFiles++;
+            }
+        }
+    }
+
+    fclose(trackingFiles);
+    return modifiedFiles;
+}
+
+int copyTrackingFiles(const char* versionDir) {
+    FILE* trackingFiles = fopen(".keep/tracking-files", "r");
+    if (trackingFiles == NULL) {
+        printf("Error: Failed to open tracking-files file.\n");
+        return -1;
+    }
+
+    char filePath[MAX_FILE_PATH_LENGTH];
+    FILE* targetFile = fopen(".keep/target/tracking-files", "w");
+    if (targetFile == NULL) {
+        printf("Error: Failed to create target tracking-files file.\n");
+        fclose(trackingFiles);
+        return -1;
+    }
+
+    while (fgets(filePath, sizeof(filePath), trackingFiles) != NULL) {
+        filePath[strcspn(filePath, "\n")] = '\0'; // Remove the trailing newline character
+        fprintf(targetFile, "%s\n", filePath);
+    }
+
+    fclose(trackingFiles);
+    fclose(targetFile);
+    return 0;
+}
+
+int updateLatestVersion(int latestVersion) {
+    FILE* latestVersionFile = fopen(".keep/latest-version", "w");
+    if (latestVersionFile == NULL) {
+        printf("Error: Failed to open latest-version file.\n");
+        return -1;
+    }
+
+    fprintf(latestVersionFile, "%d", latestVersion + 1);
+    fclose(latestVersionFile);
+    return 0;
+}
+
+int storeNoteForVersion(const char* versionDir, const char* note) {
+    FILE* noteFile = fopen(".keep/note", "w");
+    if (noteFile == NULL) {
+        printf("Error: Failed to open note file.\n");
+        return -1;
+    }
+
+    fprintf(noteFile, "%s\n", note);
+    fclose(noteFile);
+
+    char targetNoteFile[MAX_FILE_PATH_LENGTH];
+    snprintf(targetNoteFile, sizeof(targetNoteFile), "%s/target/note", versionDir);
+
+    if (copyFileToTarget(".keep/note", targetNoteFile) != 0) {
+        printf("Error: Failed to copy note file to target directory.\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+int copyFilesToTarget(const char* versionDir, const char* targetDir) {
+    FILE* trackingFiles = fopen(".keep/tracking-files", "r");
+    if (trackingFiles == NULL) {
+        printf("Error: Failed to open tracking-files file.\n");
+        return -1;
+    }
+
+    char filePath[MAX_FILE_PATH_LENGTH];
+    while (fgets(filePath, sizeof(filePath), trackingFiles) != NULL) {
+        filePath[strcspn(filePath, "\n")] = '\0'; // Remove the trailing newline character
+        char targetFile[MAX_FILE_PATH_LENGTH];
+        snprintf(targetFile, sizeof(targetFile), "%s/target/%s", versionDir, filePath);
+        if (copyFileToTarget(filePath, targetFile) != 0) {
+            fclose(trackingFiles);
+            return -1;
+        }
+    }
+
+    fclose(trackingFiles);
+    return 0;
+}
+
+int removeNonTrackingFiles() {
+    DIR* dir = opendir(".");
+    if (dir == NULL) {
+        printf("Error: Failed to open current directory.\n");
+        return -1;
+    }
+
+    FILE* trackingFiles = fopen(".keep/tracking-files", "r");
+    if (trackingFiles == NULL) {
+        printf("Error: Failed to open tracking-files file.\n");
+        closedir(dir);
+        return -1;
+    }
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+
+        char filePath[MAX_FILE_PATH_LENGTH];
+        snprintf(filePath, sizeof(filePath), "%s", entry->d_name);
+
+        int found = 0;
+        char trackedFilePath[MAX_FILE_PATH_LENGTH];
+        rewind(trackingFiles);
+        while (fgets(trackedFilePath, sizeof(trackedFilePath), trackingFiles) != NULL) {
+            trackedFilePath[strcspn(trackedFilePath, "\n")] = '\0'; // Remove the trailing newline character
+
+            if (strcmp(filePath, trackedFilePath) == 0) {
+                found = 1;
+                break;
+            }
+        }
+
+        if (!found) {
+            if (remove(filePath) != 0) {
+                printf("Error: Failed to remove file '%s'.\n", filePath);
+            }
+        }
+    }
+
+    fclose(trackingFiles);
+    closedir(dir);
+    return 0;
+}
+
+int copyFileToTarget(const char* source, const char* target) {
+    FILE* sourceFile = fopen(source, "r");
+    if (sourceFile == NULL) {
+        printf("Error: Failed to open file '%s'.\n", source);
+        return -1;
+    }
+
+    FILE* targetFile = fopen(target, "w");
+    if (targetFile == NULL) {
+        printf("Error: Failed to create target file '%s'.\n", target);
+        fclose(sourceFile);
+        return -1;
+    }
+
+    char ch;
+    while ((ch = fgetc(sourceFile)) != EOF) {
+        fputc(ch, targetFile);
+    }
+
+    fclose(sourceFile);
+    fclose(targetFile);
+    return 0;
 }
